@@ -1,9 +1,16 @@
 import streamlit as st
 from chatbot import Chatbot
+import os
+
+
+system= "You are a smart research assistant. Utilize the given documents in the database to retrieve information via the retrieve_documents tool. If you are unable to find any relevant information, you can utilize the TavilySearch tool. You are allowed to make multiple calls (either together or in sequence). Only look up information when you are sure of what you want. If you need to look up some information before asking a follow up question, you are allowed to do that! "
 
 @st.cache_resource
+
+
+
 def get_chatbot():
-    return Chatbot()
+    return Chatbot(system=system)
 
 chatbot = get_chatbot()
 
@@ -76,10 +83,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Sidebar Navigation
-import os
 
-# ... (Previous imports and setup) ...
+# Sidebar for navigation and data management
 
 with st.sidebar:
     st.markdown("---")
@@ -88,7 +93,7 @@ with st.sidebar:
 
     
     # 1. Get the current state of the widget
-    uploaded_files_list = st.file_uploader("Upload Documents", accept_multiple_files=True)
+    uploaded_files_list = st.file_uploader("", accept_multiple_files=True)
     
     # Initialize processed_files tracker if it doesn't exist
     if "processed_files" not in st.session_state:
@@ -155,9 +160,6 @@ with st.sidebar:
             
     else:
         st.info("Database is empty.")
-
-
-
 
 
 

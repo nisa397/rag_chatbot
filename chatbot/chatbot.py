@@ -1,4 +1,7 @@
+from langchain_core.tools import tool
 import os
+from pyexpat import model
+from unittest import result
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader
 from pathlib import Path
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -13,54 +16,78 @@ import os
 from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 from dotenv import load_dotenv
+from typing import TypedDict, Annotated
+import operator
+from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage, ToolMessage
+from langgraph.graph import StateGraph, END
+from langchain_tavily import TavilySearch
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_contextual import ContextualRerank
+from transformers import AutoTokenizer
 
 
+
+class AgentState(TypedDict):
+        messages: Annotated[list[AnyMessage], operator.add]
 
 class Chatbot:
+    
+
+    def create_retrieve_documents_tool(self):
+        """Create a tool version of retrieve_documents"""
+        @tool
+        def retrieve_documents(query: str):
+            """Search and return information relevant to the query, within the stored database"""
+            docs = self.retriever.invoke(query)
+            reranked_documents = self.compressor.compress_documents(
+                query=query,
+                documents=docs,
+                top_n=10
+            )
+            return "\n\n".join([doc.page_content for doc in reranked_documents])
+        
+        return retrieve_documents
+
+    def __init__(self, system=None):
 
 
-    def __init__(self):
+
         load_dotenv()
         os.environ["GOOGLE_API_KEY"] = os.getenv('GEMINI_API_KEY')
+        os.environ["TAVILY_API_KEY"] = os.getenv('TavilyAPI')
+        os.environ["CONTEXTUAL_AI_API_KEY"] = os.getenv('reranker')
+
+
+        self.system = system        
+
         self.embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+
+        self.tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=256, chunk_overlap=20, length_function=self.huggingface_token_len)
         self.persist_directory = "./chroma_langchain_db"
         self.store = {}
         self.vector_store = None
         self.initialize_vector_store()
         self.retriever = self.vector_store.as_retriever(search_type = 'mmr') if self.vector_store else None
         self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
-        self.system_prompt = """Use the following pieces of context to answer the question at the end. If you don't know the answer, just say that you don't know, don't try to make up an answer. At the end of your answer, explicitly list the sources exactly as provided in the "Sources" section below. Keep the answer as concise as possible.  """
-        self.prompt = ChatPromptTemplate.from_messages([
-            ("system", self.system_prompt),
-            MessagesPlaceholder(variable_name="chat_history"), # <--- Memory goes here
-            ("user", "{question}"),
-            ("system", "Context: {context}, Sources: {sources}")
-        ])
-        self.chain = (
-            RunnablePassthrough.assign(
-                context=lambda x: self.retriever.invoke(x["question"]),
-            )
-            .assign(
-                sources=lambda x: format_grouped_sources(x['context'])
-            )
-            .assign(answer= self.prompt | self.llm)
-        )
-        self.chain_with_history = RunnableWithMessageHistory(
-            self.chain,
-            self.get_session_history,
-            input_messages_key="question",
-            history_messages_key="chat_history",
-            output_messages_key="answer"# Must match the prompt placeholder
-        )
+        search_tool = TavilySearch(max_results=5)
+        self.checkpointer = InMemorySaver()
+        self.reranker_model = "ctxl-rerank-v2-instruct-multilingual"
+        self.compressor = ContextualRerank(
+            model=self.reranker_model,
+            api_key=os.environ["CONTEXTUAL_AI_API_KEY"])
+        self.tools = [self.create_retrieve_documents_tool(), search_tool]
+        self.graph = self.create_graph(self.tools)
+        self.thread = '1' 
 
+    def huggingface_token_len(self, text):
+        return len(self.tokenizer.encode(text))
 
     def initialize_vector_store(self):
         self.vector_store = Chroma(
             embedding_function=self.embedding_model,
             persist_directory=self.persist_directory,
         )
-
 
     def load_embeddings(self, filepaths):
         docs = []
@@ -77,6 +104,8 @@ class Chatbot:
 
             print(f"Loaded {document}")
 
+
+        
         splits = self.text_splitter.split_documents(docs)
         len(splits)
 
@@ -86,21 +115,22 @@ class Chatbot:
 
         
         print(self.vector_store._collection.count())
-
-    def get_session_history(self, session_id: str):
-        if session_id not in self.store:
-            self.store[session_id] = InMemoryChatMessageHistory()
-        return self.store[session_id]
     
-    def query_chatbot(self, question: str):
-        response = self.chain_with_history.invoke(
-            {"question": question},
-            config={
-                "configurable": {
-                    "session_id": "user_session_1"
-                    }
-                    })
-        return response['answer'].content
+
+    def create_graph(self, tools):
+        graph = StateGraph(AgentState)
+        graph.add_node("llm", self.call_llm)
+        graph.add_node("action", self.call_action )
+        graph.add_conditional_edges("llm", self.exists_action, {True: "action", False: END})
+        graph.add_edge("action", "llm")
+        graph.set_entry_point("llm")
+        graph = graph.compile(checkpointer = self.checkpointer)
+        # tools_list = {t.name: t for t in tools}
+        # print("PRINTING LIST OF TOOLS:")
+        # print(tools_list)
+        self.model = self.llm.bind_tools(tools)
+        return graph
+
     
     def delete_document(self, filename):
         # 1. Reconstruct the path used during ingestion (Must match exactly)
@@ -147,7 +177,54 @@ class Chatbot:
         except Exception as e:
             print(f"Error fetching documents: {e}")
             return set()
+
+    def query_chatbot(self, query: str):
+         messages = [HumanMessage(content=query)]
+         response = self.graph.invoke({"messages": messages}, config={
+             "configurable": {
+                 "thread_id": '1'}
+                 })    
+         
+         return parse_output(response['messages'][-1].content)
+
+
+    def exists_action(self, state: AgentState):
+        result = state['messages'][-1]
+        return len(result.tool_calls) > 0
+
+
+    # NODES
+
+    def call_llm(self, state: AgentState):
+        messages = state['messages']
+        if self.system:
+            messages = [SystemMessage(content=self.system)] + messages
+        message = self.model.invoke(messages)
+        return {'messages': [message]}
+
+    def call_action(self, state: AgentState):
+        tool_calls = state['messages'][-1].tool_calls
+        tools_by_name = {tool.name: tool for tool in self.tools}
+
+        print(f"Available tools: {list(tools_by_name.keys())}")  # Debug: see what tools are available
+
+        results = []
+        for t in tool_calls:
+            print(f"Calling {t}")
+            if  (t['name']) not in tools_by_name:
+                print(f"Bad tool call - '{t['name']}' not in {list(tools_by_name.keys())}")
+                result = 'bad tool name, retry'
+            else:
+                result = tools_by_name[t['name']].invoke(t['args'])
+        results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
+        print("Back to the model!")
+        return {'messages': results}
     
+
+    # TOOLS
+
+    
+
 def format_grouped_sources(docs):
     # Dictionary to hold source -> set of pages
     sources_data = defaultdict(set)
@@ -169,3 +246,16 @@ def format_grouped_sources(docs):
     return "; ".join(formatted_sources)
 
 
+def parse_output(content):
+        """Extract text from various content formats"""
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            # Handle list of content blocks with metadata
+            texts = []
+            for block in content:
+                if isinstance(block, dict) and 'text' in block:
+                    texts.append(block['text'])
+            return ''.join(texts) if texts else str(content)
+        else:
+            return str(content)
