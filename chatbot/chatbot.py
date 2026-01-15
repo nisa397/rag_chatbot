@@ -14,7 +14,7 @@ import os
 from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 from dotenv import load_dotenv
-from typing import TypedDict, Annotated
+from typing import List, TypedDict, Annotated
 import operator
 from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage, ToolMessage
 from langgraph.graph import StateGraph, END
@@ -24,10 +24,13 @@ from langchain_contextual import ContextualRerank
 from transformers import AutoTokenizer
 from pydantic import BaseModel, Field
 from typing import Optional
+import logging
+from rich.logging import RichHandler
+
 
 class SearchParams(BaseModel):
     query: str = Field(..., description="The semantic search query")
-    document_title: Optional[str] = Field(None, description="The specific document title to search in, if mentioned")
+    document_titles: Optional[List[str]] = Field(None, description="The specific document title or titles to search in, if mentioned")
 
 
 class AgentState(TypedDict):
@@ -40,29 +43,52 @@ class Chatbot:
         """Create a tool version of retrieve_documents"""
         @tool
         def retrieve_documents(query: str):
-            """Search and return information relevant to the query, within the stored database"""
+            """Search and return information relevant to the query, within the stored database. """
 
             structured_llm = self.llm.with_structured_output(SearchParams)
 
+            available_docs = self.get_existing_documents()
+    
+            if not available_docs:
+                return None
+            
+            docs_list = ", ".join(available_docs)
+            prompt = f"""Given this query: "{query}"
+            and these
+            Available documents: {docs_list}
+
+            Should this query search in specific documents? Respond with just the document name from the given list, if yes, otherwise respond with an empty list."""
+
             # 3. Run the extraction
-            params = structured_llm.invoke(query)
+            params = structured_llm.invoke(prompt)
             # Result: params.query='holidays', params.document_title='HR Manual'
 
             
 
-            if params.document_title:
-                print(f"Searching within document: {params.document_title}")
-
-                # 4. Conditionally apply the filter
+            if params.document_titles:
+                logging.info(f"Routing search to documents: {params.document_titles}")
                 search_kwargs = {"k": 20}
-                formatted_source = f"./temp_{params.file_name}"
-                search_kwargs["filter"] = {"source": formatted_source}
+                # Construct file paths (adjust formatting as per your storage logic)
+                target_sources = [f"./temp_{title}" for title in params.document_titles]
+                
+                # KEY FIX: Handle single vs multiple documents for vector store filtering
+                # Most vector stores (Chroma, Pinecone) support an "$in" operator for lists
+                if len(target_sources) == 1:
+                    search_kwargs["filter"] = {"source": target_sources[0]}
+                else:
+                    search_kwargs["filter"] = {"source": {"$in": target_sources}}
+                
+                # Use the ORIGINAL 'query' here, not params.query (unless you add query rewriting)
                 docs = self.vector_store.max_marginal_relevance_search(
-                    params.query,
+                    query, 
                     **search_kwargs
                 )
             else:
+                logging.info("Searching across all documents.")
                 docs = self.retriever.invoke(query)
+            
+            if not docs:
+                return "No relevant documents found."
 
             reranked_documents = self.compressor.compress_documents(
                 query=query,
@@ -75,7 +101,25 @@ class Chatbot:
 
     def __init__(self, system=None):
 
+        # Create and configure logger
+        logging.basicConfig(
+                level="INFO",
+                format="%(message)s",
+                datefmt="[%X]",
+                handlers=[RichHandler(rich_tracebacks=True)]
+            )
+                    
+        logger = logging.getLogger("rich")
 
+        # Test messages
+        logger.debug("Harmless debug Message")
+        logger.info("Just an information")
+        logger.warning("Its a Warning")
+        logger.error("Did you try to divide by zero")
+        logger.critical("Internet is down")
+        
+        # Creating an object
+        logger = logging.getLogger()
 
         load_dotenv()
         os.environ["GOOGLE_API_KEY"] = os.getenv('GEMINI_API_KEY')
@@ -104,6 +148,7 @@ class Chatbot:
         self.tools = [self.create_retrieve_documents_tool(), search_tool]
         self.graph = self.create_graph(self.tools)
         self.thread = '1' 
+        logging.info("Chatbot initialized with tools and graph.")
 
     def huggingface_token_len(self, text):
         return len(self.tokenizer.encode(text))
@@ -113,6 +158,7 @@ class Chatbot:
             embedding_function=self.embedding_model,
             persist_directory=self.persist_directory,
         )
+        logging.info("Vector store initialized.")
 
     def load_embeddings(self, filepaths):
         docs = []
@@ -121,6 +167,7 @@ class Chatbot:
         # Iterate over everything in the directory
         for document in filepaths:
             print(f"loading document: {document}")
+            logging.info(f"Loading document: {document}")
 
             if Path(document).suffix == '.pdf':
                 docs.extend(PyPDFLoader(document).load())
@@ -128,6 +175,7 @@ class Chatbot:
                 docs.extend(UnstructuredWordDocumentLoader(document).load())
 
             print(f"Loaded {document}")
+            logging.info(f"Loaded document: {document}")
 
 
         
@@ -140,9 +188,12 @@ class Chatbot:
 
         
         print(self.vector_store._collection.count())
+        logging.info(f"Total documents in vector store: {self.vector_store._collection.count()}")
+        logging.info("Embeddings loaded successfully.")
     
 
     def create_graph(self, tools):
+        logging.info("Creating state graph for the agent.")
         graph = StateGraph(AgentState)
         graph.add_node("llm", self.call_llm)
         graph.add_node("action", self.call_action )
@@ -150,10 +201,11 @@ class Chatbot:
         graph.add_edge("action", "llm")
         graph.set_entry_point("llm")
         graph = graph.compile(checkpointer = self.checkpointer)
-        # tools_list = {t.name: t for t in tools}
-        # print("PRINTING LIST OF TOOLS:")
-        # print(tools_list)
+        logging.info(f"tools list: {tools}")
         self.model = self.llm.bind_tools(tools)
+        logging.info("State graph created successfully.")
+
+
         return graph
 
     
@@ -162,7 +214,7 @@ class Chatbot:
         # Based on your previous code: f"./temp_{uploaded_file.name}"
         temp_path = f"./temp_{filename}"
         
-        print(f"Removing vectors for source: {temp_path}")
+        logging.info(f"Removing vectors for source: {temp_path}")
 
         # 2. Find IDs of all chunks where metadata 'source' matches this path
         # Chroma allows filtering by metadata using the 'where' clause
@@ -173,10 +225,10 @@ class Chatbot:
         # 3. Delete them
         if ids_to_delete:
             self.vector_store.delete(ids=ids_to_delete)
-            print(f"Successfully deleted {len(ids_to_delete)} chunks.")
+            logging.info(f"Successfully deleted {len(ids_to_delete)} chunks.")
             return True
         else:
-            print("No chunks found for this file.")
+            logging.info("No chunks found for this file.")
             return False
         
     def get_existing_documents(self):
@@ -200,7 +252,7 @@ class Chatbot:
             
             return unique_sources
         except Exception as e:
-            print(f"Error fetching documents: {e}")
+            logging.error(f"Error fetching documents: {e}")
             return set()
 
     def query_chatbot(self, query: str):
@@ -231,18 +283,18 @@ class Chatbot:
         tool_calls = state['messages'][-1].tool_calls
         tools_by_name = {tool.name: tool for tool in self.tools}
 
-        print(f"Available tools: {list(tools_by_name.keys())}")  # Debug: see what tools are available
+        logging.info(f"Available tools: {list(tools_by_name.keys())}")  # Debug: see what tools are available
 
         results = []
         for t in tool_calls:
-            print(f"Calling {t}")
+            logging.info(f"Calling {t}")
             if  (t['name']) not in tools_by_name:
-                print(f"Bad tool call - '{t['name']}' not in {list(tools_by_name.keys())}")
+                logging.error(f"Bad tool call - '{t['name']}' not in {list(tools_by_name.keys())}")
                 result = 'bad tool name, retry'
             else:
                 result = tools_by_name[t['name']].invoke(t['args'])
         results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
-        print("Back to the model!")
+        logging.info("Back to the model!")
         return {'messages': results}
     
 
