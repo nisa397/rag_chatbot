@@ -1,7 +1,5 @@
 from langchain_core.tools import tool
 import os
-from pyexpat import model
-from unittest import result
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader
 from pathlib import Path
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -24,7 +22,12 @@ from langchain_tavily import TavilySearch
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_contextual import ContextualRerank
 from transformers import AutoTokenizer
+from pydantic import BaseModel, Field
+from typing import Optional
 
+class SearchParams(BaseModel):
+    query: str = Field(..., description="The semantic search query")
+    document_title: Optional[str] = Field(None, description="The specific document title to search in, if mentioned")
 
 
 class AgentState(TypedDict):
@@ -38,7 +41,29 @@ class Chatbot:
         @tool
         def retrieve_documents(query: str):
             """Search and return information relevant to the query, within the stored database"""
-            docs = self.retriever.invoke(query)
+
+            structured_llm = self.llm.with_structured_output(SearchParams)
+
+            # 3. Run the extraction
+            params = structured_llm.invoke(query)
+            # Result: params.query='holidays', params.document_title='HR Manual'
+
+            
+
+            if params.document_title:
+                print(f"Searching within document: {params.document_title}")
+
+                # 4. Conditionally apply the filter
+                search_kwargs = {"k": 20}
+                formatted_source = f"./temp_{params.file_name}"
+                search_kwargs["filter"] = {"source": formatted_source}
+                docs = self.vector_store.max_marginal_relevance_search(
+                    params.query,
+                    **search_kwargs
+                )
+            else:
+                docs = self.retriever.invoke(query)
+
             reranked_documents = self.compressor.compress_documents(
                 query=query,
                 documents=docs,

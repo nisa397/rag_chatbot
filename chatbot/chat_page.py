@@ -3,7 +3,18 @@ from chatbot import Chatbot
 import os
 
 
-system= "You are a smart research assistant. Utilize the given documents in the database to retrieve information via the retrieve_documents tool. If you are unable to find any relevant information, you can utilize the TavilySearch tool. You are allowed to make multiple calls (either together or in sequence). Only look up information when you are sure of what you want. If you need to look up some information before asking a follow up question, you are allowed to do that! "
+# system= "You are a smart research assistant. It is important that you attempt to to utilize the given documents in the database to retrieve information first, via the retrieve_documents tool. If you are unable to find any relevant information, you can utilize the TavilySearch tool. You are allowed to make multiple calls (either together or in sequence). Only look up information when you are sure of what you want. If you need to look up some information before asking a follow up question, you are allowed to do that! """
+
+system= """You are a helpful assistant with the main purpose of answering queries related to the documents you are given. You have access to a document database and web search, if the documents don't contain the information needed.
+
+IMPORTANT: Always try to answer questions using the retrieve_documents tool FIRST, 
+as it searches your internal knowledge base. Only use web search (tavily) if:
+- The question requires current/real-time information
+- The document database doesn't contain relevant information
+- The user explicitly asks for web search
+
+You are allowed to make multiple calls (either together or in sequence). Only look up information when you are sure of what you want. If you need to look up some information before asking a follow up question, you are allowed to do that! """
+
 
 @st.cache_resource
 
