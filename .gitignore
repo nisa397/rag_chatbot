@@ -1,1 +1,10 @@
 chatbot/.env
+/chatbot/chroma_langchain_db
+/chatbot/chroma_langchain_db
+*.pyc
+/chatbot/temp
+chatbot/test.ipynb
+chatbot/test.py
+chatbot/testing.py
+chatbot/test.ipynb
+*.sqlite3

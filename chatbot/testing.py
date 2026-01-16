@@ -1,25 +1,39 @@
 from chatbot import Chatbot
+import logging
+from rich.logging import RichHandler
 
-system= "You are a smart research assistant. Utilize the given documents in the database to retrieve information via the retrieve_documents tool. If you are unable to find any relevant information, you can utilize the TavilySearch tool. You are allowed to make multiple calls (either together or in sequence). Only look up information when you are sure of what you want. If you need to look up some information before asking a follow up question, you are allowed to do that! "
+logging.basicConfig(
+                level="INFO",
+                format="%(message)s",
+                datefmt="[%X]",
+                handlers=[RichHandler(rich_tracebacks=True)]
+            )
+
+
+system= """You are a helpful assistant with the main purpose of answering queries related to the documents you are given. You have access to a document database and web search to use if the documents don't contain the information needed.
+
+IMPORTANT: Always try to answer questions using the retrieve_documents tool FIRST, 
+as it searches your internal knowledge base. Only use web search (tavily) if:
+- The question requires current/real-time information
+- The document database doesn't contain relevant information
+
+You are allowed to make multiple calls (either together or in sequence). Only look up information when you are sure of what you want. If you need to look up some information before asking a follow up question, you are allowed to do that! """
 chatbot = Chatbot(system=system)
 
-# print("TOOLS LIST:")
-# print("PRINTING TYPE OF TOOLS LIST:")
-# print(type())
-# print("PRINTING LENGTH OF TOOLS LIST:")
-# print(len(chatbot.tools_list))
-# print(chatbot.tools_list)
+logging.info("INITIALIZED CHATBOT")
+chatbot.load_embeddings(r"C:\Users\mailm\Documents\GitHub\rag_chatbot\chatbot\temp\temp_Apple_10-K-2021.pdf")
 
-print("LOADING EMBEDDINGS AND VECTORSTORE...")
-print(chatbot.vector_store)
-print(chatbot.vector_store._collection.count())
+logging.info("LOADING EMBEDDINGS AND VECTORSTORE...")
+logging.info(chatbot.vector_store)
 
-query = "What is Tesla, and who are their competitors?"
+logging.info(chatbot.vector_store._collection.count())
 
-print(f"ASKING QUERY: {query}")
+query = "What is Apple?"
+
+logging.info(f"ASKING QUERY: {query}")
 
 response = chatbot.query_chatbot(query)
 
-print("RESPONSE:")
-print(response)
+logging.info("RESPONSE:")
+logging.info(response)
 

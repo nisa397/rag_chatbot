@@ -1,3 +1,4 @@
+from urllib import response
 from langchain_core.tools import tool
 import os
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader
@@ -35,73 +36,13 @@ class SearchParams(BaseModel):
 
 class AgentState(TypedDict):
         messages: Annotated[list[AnyMessage], operator.add]
+        citations: Annotated[list[dict], lambda x, y: y]
 
 class Chatbot:
-    
-
-    def create_retrieve_documents_tool(self):
-        """Create a tool version of retrieve_documents"""
-        @tool
-        def retrieve_documents(query: str):
-            """Search and return information relevant to the query, within the stored database. """
-
-            structured_llm = self.llm.with_structured_output(SearchParams)
-
-            available_docs = self.get_existing_documents()
-    
-            if not available_docs:
-                return None
-            
-            docs_list = ", ".join(available_docs)
-            prompt = f"""Given this query: "{query}"
-            and these
-            Available documents: {docs_list}
-
-            Should this query search in specific documents? Respond with just the document name from the given list, if yes, otherwise respond with an empty list."""
-
-            # 3. Run the extraction
-            params = structured_llm.invoke(prompt)
-            # Result: params.query='holidays', params.document_title='HR Manual'
-
-            
-
-            if params.document_titles:
-                logging.info(f"Routing search to documents: {params.document_titles}")
-                search_kwargs = {"k": 20}
-                # Construct file paths (adjust formatting as per your storage logic)
-                target_sources = [f"./temp_{title}" for title in params.document_titles]
-                
-                # KEY FIX: Handle single vs multiple documents for vector store filtering
-                # Most vector stores (Chroma, Pinecone) support an "$in" operator for lists
-                if len(target_sources) == 1:
-                    search_kwargs["filter"] = {"source": target_sources[0]}
-                else:
-                    search_kwargs["filter"] = {"source": {"$in": target_sources}}
-                
-                # Use the ORIGINAL 'query' here, not params.query (unless you add query rewriting)
-                docs = self.vector_store.max_marginal_relevance_search(
-                    query, 
-                    **search_kwargs
-                )
-            else:
-                logging.info("Searching across all documents.")
-                docs = self.retriever.invoke(query)
-            
-            if not docs:
-                return "No relevant documents found."
-
-            reranked_documents = self.compressor.compress_documents(
-                query=query,
-                documents=docs,
-                top_n=10
-            )
-            return "\n\n".join([doc.page_content for doc in reranked_documents])
-        
-        return retrieve_documents
 
     def __init__(self, system=None):
 
-        # Create and configure logger
+        # Create and configure logging
         logging.basicConfig(
                 level="INFO",
                 format="%(message)s",
@@ -109,17 +50,9 @@ class Chatbot:
                 handlers=[RichHandler(rich_tracebacks=True)]
             )
                     
-        logger = logging.getLogger("rich")
-
-        # Test messages
-        logger.debug("Harmless debug Message")
-        logger.info("Just an information")
-        logger.warning("Its a Warning")
-        logger.error("Did you try to divide by zero")
-        logger.critical("Internet is down")
         
-        # Creating an object
-        logger = logging.getLogger()
+
+
 
         load_dotenv()
         os.environ["GOOGLE_API_KEY"] = os.getenv('GEMINI_API_KEY')
@@ -191,7 +124,6 @@ class Chatbot:
         logging.info(f"Total documents in vector store: {self.vector_store._collection.count()}")
         logging.info("Embeddings loaded successfully.")
     
-
     def create_graph(self, tools):
         logging.info("Creating state graph for the agent.")
         graph = StateGraph(AgentState)
@@ -207,12 +139,11 @@ class Chatbot:
 
 
         return graph
-
     
     def delete_document(self, filename):
         # 1. Reconstruct the path used during ingestion (Must match exactly)
         # Based on your previous code: f"./temp_{uploaded_file.name}"
-        temp_path = f"./temp_{filename}"
+        temp_path = f"temp/temp_{filename}"
         
         logging.info(f"Removing vectors for source: {temp_path}")
 
@@ -260,10 +191,15 @@ class Chatbot:
          response = self.graph.invoke({"messages": messages}, config={
              "configurable": {
                  "thread_id": '1'}
-                 })    
+                 })
          
-         return parse_output(response['messages'][-1].content)
-
+         final_text = parse_output(response['messages'][-1].content)
+         
+         final_citations = response.get('citations', [])
+         return {
+             "response": final_text,
+             "citations": final_citations
+            }
 
     def exists_action(self, state: AgentState):
         result = state['messages'][-1]
@@ -286,41 +222,122 @@ class Chatbot:
         logging.info(f"Available tools: {list(tools_by_name.keys())}")  # Debug: see what tools are available
 
         results = []
+        new_citations = []
         for t in tool_calls:
             logging.info(f"Calling {t}")
             if  (t['name']) not in tools_by_name:
                 logging.error(f"Bad tool call - '{t['name']}' not in {list(tools_by_name.keys())}")
                 result = 'bad tool name, retry'
             else:
-                result = tools_by_name[t['name']].invoke(t['args'])
+                tool_output = tools_by_name[t['name']].invoke(t['args'])
+                logging.info("Tool returned result.")
+                logging.info(tool_output)
+                # CHECK: Is this our document tool returning rich data?
+                if isinstance(tool_output, dict) and "citations" in tool_output:
+                    # 1. Give the LLM ONLY the text content
+                    result = tool_output["context_text"]
+                    # 2. Save the citations to our state list
+                    new_citations = tool_output["citations"]
+                else:
+                    result = tool_output
+                
+
+                
+
+
         results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
         logging.info("Back to the model!")
-        return {'messages': results}
+        return {'messages': results, 'citations': new_citations}
     
 
     # TOOLS
+    def create_retrieve_documents_tool(self):
+        """Create a tool version of retrieve_documents"""
+        @tool
+        def retrieve_documents(query: str):
+            """Search and return information relevant to the query, within the stored database. """
 
+            structured_llm = self.llm.with_structured_output(SearchParams)
+
+            available_docs = self.get_existing_documents()
+    
+            if not available_docs:
+                return None
+            
+            docs_list = ", ".join(available_docs)
+            prompt = f"""Given this query: "{query}"
+            and these
+            Available documents: {docs_list}
+
+            Should this query search in specific documents? Respond with just the document name from the given list, if yes, otherwise respond with an empty list."""
+
+            # 3. Run the extraction
+            params = structured_llm.invoke(prompt)
+            # Result: params.query='holidays', params.document_title='HR Manual'
+
+            
+
+            if params.document_titles:
+                logging.info(f"Routing search to documents: {params.document_titles}")
+                search_kwargs = {"k": 20}
+                # Construct file paths (adjust formatting as per your storage logic)
+                target_sources = [f"temp/temp_{title}" for title in params.document_titles]
+                
+                # KEY FIX: Handle single vs multiple documents for vector store filtering
+                # Most vector stores (Chroma, Pinecone) support an "$in" operator for lists
+                if len(target_sources) == 1:
+                    search_kwargs["filter"] = {"source": target_sources[0]}
+                else:
+                    search_kwargs["filter"] = {"source": {"$in": target_sources}}
+                
+                # Use the ORIGINAL 'query' here, not params.query (unless you add query rewriting)
+                docs = self.vector_store.max_marginal_relevance_search(
+                    query, 
+                    **search_kwargs
+                )
+            else:
+                logging.info("Searching across all documents.")
+                docs = self.retriever.invoke(query)
+            
+            if not docs:
+                return "No relevant documents found."
+
+            reranked_documents = self.compressor.compress_documents(
+                query=query,
+                documents=docs,
+                top_n=5
+            )
+
+            logging.info(f"Reranked documents:")
+            logging.info(reranked_documents)
+            # Collect reranked documents metadata: Source, page number and content
+            citations = format_grouped_sources(reranked_documents)
+            logging.info("Citations for reranked documents:")
+            logging.info(citations[0]['content'])           
+
+            context_text = "\n\n".join([doc.page_content for doc in reranked_documents])
+
+            return {
+                "context_text": context_text,
+                "citations": citations
+            }
+        
+        return retrieve_documents
     
 
 def format_grouped_sources(docs):
     # Dictionary to hold source -> set of pages
-    sources_data = defaultdict(set)
+    citations = []
 
     for doc in docs:
         source = doc.metadata.get('source', 'Unknown Source')
         # Use 'page_label' or fallback to 'page'
         page = str(doc.metadata.get('page_label', doc.metadata.get('page', 'N/A')))
-        sources_data[source].add(page)
 
-    # Create the formatted string
-    formatted_sources = []
-    for source, pages in sources_data.items():
-        # Sort pages for cleaner look
-        sorted_pages = sorted(list(pages))
-        pages_str = ", ".join(sorted_pages)
-        formatted_sources.append(f"Source: {source}, Pages: {pages_str}")
+        content =  clean_text(doc.page_content)
+        citations.append({'source': source, 'page': page, 'content': content})
         
-    return "; ".join(formatted_sources)
+    return citations
 
 
 def parse_output(content):
@@ -336,3 +353,16 @@ def parse_output(content):
             return ''.join(texts) if texts else str(content)
         else:
             return str(content)
+        
+def clean_text(text):
+    """Convert escape sequences to spaces and normalize whitespace"""
+    # Replace escape sequences with spaces
+    text = text.replace('\\t', ' ')
+    text = text.replace('\\n', ' ')
+    text = text.replace('\\r', ' ')
+    # Remove extra/multiple spaces
+    text = ' '.join(text.split())
+    return text
+
+
+

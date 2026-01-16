@@ -2,38 +2,148 @@ import streamlit as st
 from chatbot import Chatbot
 import os
 
+import streamlit as st
+import fitz  # PyMuPDF
+from PIL import Image
+import logging
+from rich.logging import RichHandler
 
-# system= "You are a smart research assistant. It is important that you attempt to to utilize the given documents in the database to retrieve information first, via the retrieve_documents tool. If you are unable to find any relevant information, you can utilize the TavilySearch tool. You are allowed to make multiple calls (either together or in sequence). Only look up information when you are sure of what you want. If you need to look up some information before asking a follow up question, you are allowed to do that! """
 
-system= """You are a helpful assistant with the main purpose of answering queries related to the documents you are given. You have access to a document database and web search, if the documents don't contain the information needed.
+system= """You are a helpful assistant with the main purpose of answering queries related to the documents you are given. You have access to a document database and web search to use if the documents don't contain the information needed.
 
 IMPORTANT: Always try to answer questions using the retrieve_documents tool FIRST, 
 as it searches your internal knowledge base. Only use web search (tavily) if:
 - The question requires current/real-time information
 - The document database doesn't contain relevant information
-- The user explicitly asks for web search
 
 You are allowed to make multiple calls (either together or in sequence). Only look up information when you are sure of what you want. If you need to look up some information before asking a follow up question, you are allowed to do that! """
 
+citations = []
 
 @st.cache_resource
 
 
-
 def get_chatbot():
     return Chatbot(system=system)
+logging.basicConfig(
+                level="INFO",
+                format="%(message)s",
+                datefmt="[%X]",
+                handlers=[RichHandler(rich_tracebacks=True)]
+            )
 
+os.makedirs("temp", exist_ok=True)
 chatbot = get_chatbot()
 
 def get_filepaths(uploaded_files):
     filepaths = []
     for uploaded_file in uploaded_files:
         # Save the uploaded file to a temporary location
-        with open(f"./temp_{uploaded_file.name}", "wb") as f:
+        with open(f"temp/temp_{uploaded_file.name}", "wb") as f:
             f.write(uploaded_file.getbuffer())
-        filepaths.append(f"./temp_{uploaded_file.name}")
+        filepaths.append(f"temp/temp_{uploaded_file.name}")
  
     return filepaths
+
+def smart_highlight(page, search_text):
+    """
+    Attempts to highlight text on a page using two strategies:
+    1. Exact Match: Searches for the exact string.
+    2. Anchor Match: Searches for the first 5 words (Head) and last 5 words (Tail).
+    """
+    # Strategy 1: Exact Match (Fastest)
+    # quads=True allows efficient highlighting of slanted/complex text
+    text_instances = page.search_for(search_text, quads=True)
+    
+    if text_instances:
+        for inst in text_instances:
+            page.add_highlight_annot(inst)
+        return True
+
+    # Strategy 2: Anchor Match (Robust to newlines/hyphens)
+    words = search_text.split()
+    
+    # Only try anchor search if the text is long enough (e.g., > 10 words)
+    if len(words) < 10:
+        return False
+        
+    # Define Anchors (First 5 words and Last 5 words)
+    head_text = " ".join(words[:5])
+    tail_text = " ".join(words[-5:])
+    
+    # Search for instances of head and tail
+    head_instances = page.search_for(head_text, quads=True)
+    tail_instances = page.search_for(tail_text, quads=True)
+    
+    if head_instances and tail_instances:
+        # We found both start and end phrases. 
+        # Logic: Find a tail that appears AFTER a head.
+        
+        # Take the first valid pair we find (Simple greedy approach)
+        # In a production app, you might compare Y-coordinates to ensure they are close.
+        valid_match = False
+        
+        for head in head_instances:
+            for tail in tail_instances:
+                # Check if tail is visually "after" head (simplistic check using rect objects)
+                # PyMuPDF Quads/Rects: (x0, y0, x1, y1)
+                # We check if tail.y1 (bottom) >= head.y0 (top)
+                if tail.lr.y >= head.ul.y: 
+                    # Highlight the Start (Greenish)
+                    annot_head = page.add_highlight_annot(head)
+                    annot_head.set_colors(stroke=(0.5, 1, 0.5)) # Light Green
+                    annot_head.update()
+                    
+                    # Highlight the End (Reddish)
+                    annot_tail = page.add_highlight_annot(tail)
+                    annot_tail.set_colors(stroke=(1, 0.5, 0.5)) # Light Red
+                    annot_tail.update()
+                    
+                    # Optional: Draw a line connecting them to show the relationship
+                    # p1 = head.lr  # Bottom-right of head
+                    # p2 = tail.ul  # Top-left of tail
+                    # page.draw_line(p1, p2, color=(1, 1, 0), width=2)
+                    
+                    valid_match = True
+        
+        return valid_match
+
+    return False
+
+def find_and_display_page(pdf_file, search_text, target_page_num=None):
+    # 1. Open the PDF
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    
+    found_page_index = -1
+    
+    # OPTIMIZATION: If we already know the page number from RAG, check that first!
+    if target_page_num is not None:
+        # Adjust for 0-based index vs 1-based user input
+        target_idx = int(target_page_num) - 1 
+        if 0 <= target_idx < len(doc):
+            page = doc[target_idx]
+            if smart_highlight(page, search_text):
+                found_page_index = target_idx
+    
+    # If not found yet (or no page hint provided), Scan ALL pages
+    if found_page_index == -1:
+        for i, page in enumerate(doc):
+            if smart_highlight(page, search_text):
+                found_page_index = i
+                break
+            
+    if found_page_index != -1:
+        st.success(f"Found text on page {found_page_index + 1}")
+        
+        # 4. Render the specific page to an image
+        page = doc.load_page(found_page_index)
+        pix = page.get_pixmap(dpi=150)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        
+        return img
+    else:
+        st.error(f"Text could not be matched exactly. Try a shorter snippet.")
+        return None
 
 # Page configuration
 st.set_page_config(page_title="Chatbot Interface", layout="wide")
@@ -119,10 +229,7 @@ with st.sidebar:
             filepaths = get_filepaths(new_files)
             
             # Uncomment when chatbot is connected
-            chatbot.load_embeddings(filepaths)
-            for file_path in filepaths:
-                os.remove(file_path)
-            print("File deleted successfully")            
+            chatbot.load_embeddings(filepaths)         
             for f in new_files:
                 st.session_state.processed_files.add(f.name)
             
@@ -189,16 +296,29 @@ if st.session_state.current_page == "Chat":
         message_html += '<p style="color: grey; text-align: center; margin-top: 200px;">Start a conversation...</p>'
     
     for role, text in st.session_state.messages:
+        # logging.info(st.session_state.messages)
         if role == "user":
             message_html += f'<div class="clearfix"><div class="user-message">👤 <b>You:</b><br>{text}</div></div>'
-        else:
-            message_html += f'<div class="clearfix"><div class="bot-message">🤖 <b>Bot:</b><br>{text}</div></div>'
+        elif role == "bot":
+            citations = []
+            message_html += f"""<div class="clearfix"><div class="bot-message">🤖 <b>Bot:</b><br>{text['response']}</div></div>"""
+            citations = text.get("citations", [])
             
     message_html += '</div>'
     
     with chat_container:
         st.markdown(message_html, unsafe_allow_html=True)
+        for citation in citations:
+            st.info(f"Referenced from {citation['source']} (Page {citation['page']})")
 
+            try: 
+                if citation.get("image"):
+                    st.image(citation["image"], use_container_width=True)
+                else:
+                    st.warning("Citation image could not be generated")
+            except Exception as e:
+                st.error(f"Error displaying citations: {str(e)}")
+                logging.error(f"Citation display error: {e}")
     # 2. Input Area
     # Using a form ensures 'Enter' key works to submit
     with st.form(key="chat_form", clear_on_submit=True):
@@ -221,10 +341,27 @@ if st.session_state.current_page == "Chat":
             
             
             # Simulate bot response
-            # In a real app, you would call your chatbot API here
 
             bot_response = chatbot.query_chatbot(user_input)
+            if len(bot_response.get("citations", [])) > 0:
+                # Show citations
+                for i, cite in enumerate(bot_response["citations"]):
+                    source = cite.get("source")
+                    page = cite.get("page")
+                    cited_content = cite.get("content")
+                    citation_image = find_and_display_page(
+                        open(source, "rb"), 
+                        cited_content,
+                        target_page_num=page)
+                    if citation_image:
+                        bot_response["citations"][i]["image"] = citation_image
             st.session_state.messages.append(("bot", bot_response))
+
+            
+
+
+                
+
             
             st.rerun()
 
