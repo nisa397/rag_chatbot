@@ -311,10 +311,9 @@ class Chatbot:
             logging.info(f"Reranked documents:")
             logging.info(reranked_documents)
             # Collect reranked documents metadata: Source, page number and content
+            reranked_documents = [doc for doc in reranked_documents if doc.metadata['relevance_score'] > 0.8]
             citations = format_grouped_sources(reranked_documents)
             logging.info("Citations for reranked documents:")
-            logging.info(citations[0]['content'])           
-
             context_text = "\n\n".join([doc.page_content for doc in reranked_documents])
 
             return {
