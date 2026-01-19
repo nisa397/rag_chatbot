@@ -149,8 +149,10 @@ def find_and_display_page(pdf_file, search_text, target_page_num=None):
         return None
 
 def display_citations(citations):
-    for citation in citations:
-        st.info(f"Referenced from {citation['source']} (Page {citation['page']})")
+
+    with st.expander("Show citations"):
+        for citation in citations:
+            st.info(f"Referenced from {citation['source']} (Page {citation['page']})")
         try: 
             if citation.get("image"):
                 st.image(citation["image"], use_container_width=True)
@@ -159,68 +161,14 @@ def display_citations(citations):
         except Exception as e:
             st.error(f"Error displaying citations: {str(e)}")
             logging.error(f"Citation display error: {e}")
+    
 # Page configuration
 st.set_page_config(page_title="Chatbot Interface", layout="wide")
 
 # Initialize session state variables
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "current_page" not in st.session_state:
-    st.session_state.current_page = "RAG Chatbot"
 
-
-# Custom CSS to style the chat container with a black border and other UI elements
-# st.markdown("""
-# <style>
-#     /* Style for the chat box container */
-#     .chat-box {
-#         padding: 20px;
-#         height: 500px;
-#         overflow-y: auto;
-#         background-color: #ffffff;
-#         margin-bottom: 20px;
-#     }
-    
-#     /* Style for individual messages */
-#     .user-message {
-#         background-color: #f0f2f6;
-#         padding: 10px;
-#         border-radius: 10px;
-#         margin-bottom: 10px;
-#         text-align: right;
-#         display: inline-block;
-#         float: right;
-#         clear: both;
-#         max-width: 70%;
-#     }
-    
-#     .bot-message {
-#         background-color: #e6e9ef;
-#         padding: 10px;
-#         border-radius: 10px;
-#         margin-bottom: 10px;
-#         text-align: left;
-#         display: inline-block;
-#         float: left;
-#         clear: both;
-#         max-width: 70%;
-#     }
-
-#     /* Clear float fix */
-#     .clearfix::after {
-#         content: "";
-#         clear: both;
-#         display: table;
-#     }
-    
-#     /* Hide default Streamlit main menu and footer for cleaner look */
-#     #MainMenu {visibility: hidden;}
-#     footer {visibility: hidden;}
-# </style>
-# """, unsafe_allow_html=True)
-
-
-# Sidebar for navigation and data management
 
 with st.sidebar:
     st.markdown("---")
@@ -292,18 +240,8 @@ with st.sidebar:
     else:
         st.info("Database is empty.")
 
-
-
 # Main Content Area
-st.title(st.session_state.current_page)
-
-
-# 1. Display Chat History in a styled box
-# chat_container = st.container()
-
-# We use a markdown div to create the 'black border box' visual
-# Inside, we render the messages
-# message_html = '<div class="chat-box">'
+# st.title(st.session_state.current_page)
 
 if not st.session_state.messages:
 
@@ -317,40 +255,12 @@ for message in st.session_state.messages:
         elif message["role"] == "assistant":
             st.markdown(message["content"]["response"])
             citations = message["content"].get("citations", [])
+
             display_citations(citations)
             
 
-        
-
-    # logging.info(st.session_state.messages)
-    # if role == "user":
-    #     message_html += f'<div class="clearfix"><div class="user-message">👤 <b>You:</b><br>{text}</div></div>'
-    # elif role == "bot":
-    #     citations = []
-    #     message_html += f"""<div class="clearfix"><div class="bot-message">🤖 <b>Bot:</b><br>{text['response']}</div></div>"""
-    #     citations = text.get("citations", [])
-        
-# message_html += '</div>'
-
-# with chat_container:
-    # st.markdown(message_html, unsafe_allow_html=True)
-# for citation in citations:
-#     st.info(f"Referenced from {citation['source']} (Page {citation['page']})")
-#     try: 
-#         if citation.get("image"):
-#             st.image(citation["image"], use_container_width=True)
-#         else:
-#             st.warning("Citation image could not be generated")
-#     except Exception as e:
-#         st.error(f"Error displaying citations: {str(e)}")
-#         logging.error(f"Citation display error: {e}")
-# 2. Input Area
-# Using a form ensures 'Enter' key works to submit
-
 if prompt := st.chat_input("Type your message here...", key="input_text"):
-    # Add user message
-        # st.session_state.messages("user").markdown(prompt)
-        # st.session_state.messages.append(("user", user_input))
+        # Add user message
         st.session_state.messages.append({"role": "user", "content": prompt}) 
 
         bot_response = chatbot.query_chatbot(prompt)
@@ -369,50 +279,6 @@ if prompt := st.chat_input("Type your message here...", key="input_text"):
         st.session_state.messages.append({"role": "assistant", "content": bot_response})
 
         st.rerun()
-
-     
-
-
-
-
-# with st.form(key="chat_form", clear_on_submit=True):
-#     col1, col2 = st.columns([6, 1])
-    
-#     with col1:
-#         user_input = st.text_input(
-#             "Message", 
-#             placeholder="Type something...", 
-#             label_visibility="collapsed",
-#             key="input_text"
-#         )
-        
-#     with col2:
-#         submit_button = st.form_submit_button("Send", use_container_width=True)
-
-#     if submit_button and user_input:
-
-#         # Add user message
-#         st.session_state.messages("user").markdown(user_input)
-#         # st.session_state.messages.append(("user", user_input))
-#         st.session_state.messages.append({"role": "user", "content": user_input}) 
-
-#         bot_response = chatbot.query_chatbot(user_input)
-#         if len(bot_response.get("citations", [])) > 0:
-#             # Show citations
-#             for i, cite in enumerate(bot_response["citations"]):
-#                 source = cite.get("source")
-#                 page = cite.get("page")
-#                 cited_content = cite.get("content")
-#                 citation_image = find_and_display_page(
-#                     open(source, "rb"), 
-#                     cited_content,
-#                     target_page_num=page)
-#                 if citation_image:
-#                     bot_response["citations"][i]["image"] = citation_image
-#         st.session_state.messages.append(("assistant", bot_response))
-
-        
-
 
             
 
