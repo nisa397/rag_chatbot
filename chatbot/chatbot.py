@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 import logging
 from rich.logging import RichHandler
+from langgraph.config import get_stream_writer  
 
 
 class SearchParams(BaseModel):
@@ -99,7 +100,7 @@ class Chatbot:
         # Define the directory
         # Iterate over everything in the directory
         for document in filepaths:
-            print(f"loading document: {document}")
+            # print(f"loading document: {document}")
             logging.info(f"Loading document: {document}")
 
             if Path(document).suffix == '.pdf':
@@ -187,19 +188,32 @@ class Chatbot:
             return set()
 
     def query_chatbot(self, query: str):
-         messages = [HumanMessage(content=query)]
-         response = self.graph.invoke({"messages": messages}, config={
-             "configurable": {
-                 "thread_id": '1'}
-                 })
-         
-         final_text = parse_output(response['messages'][-1].content)
-         
-         final_citations = response.get('citations', [])
-         return {
-             "response": final_text,
-             "citations": final_citations
+        messages = [HumanMessage(content=query)]
+
+        thread={"configurable": {"thread_id": '1'}}
+
+        final_citations= []
+
+        for stream_mode, chunk in self.graph.stream({"messages": messages},
+                                        thread, 
+                                        stream_mode = ["updates", "custom", "messages"]):
+            logging.info(f"Chunk: {chunk}")
+
+            if 'action' in chunk and 'citations' in chunk['action']:
+                # logging.info(f"CITATIONS FOUND: {chunk['action']['citations']}")
+                final_citations = chunk['action']['citations']
+            
+            
+            yield  {
+            "response": chunk,
+            "citations": final_citations,
+            'stream_mode': stream_mode
             }
+         
+        # final_text = parse_output(response['messages'][-1].content)
+         
+        
+        
 
     def exists_action(self, state: AgentState):
         result = state['messages'][-1]
@@ -257,6 +271,10 @@ class Chatbot:
         def retrieve_documents(query: str):
             """Search and return information relevant to the query, within the stored database. """
 
+            writer = get_stream_writer()
+
+            writer(f"Retrieving documents from vector store...")
+
             structured_llm = self.llm.with_structured_output(SearchParams)
 
             available_docs = self.get_existing_documents()
@@ -286,8 +304,10 @@ class Chatbot:
                 # KEY FIX: Handle single vs multiple documents for vector store filtering
                 # Most vector stores (Chroma, Pinecone) support an "$in" operator for lists
                 if len(target_sources) == 1:
+                    writer(f"Searching in document: {target_sources[0]}")
                     search_kwargs["filter"] = {"source": target_sources[0]}
                 else:
+                    writer(f"Searching in documents: {', '.join(target_sources)}")
                     search_kwargs["filter"] = {"source": {"$in": target_sources}}
                 
                 # Use the ORIGINAL 'query' here, not params.query (unless you add query rewriting)
@@ -297,11 +317,14 @@ class Chatbot:
                 )
             else:
                 logging.info("Searching across all documents.")
+                writer("Searching across all documents.")
                 docs = self.retriever.invoke(query)
             
             if not docs:
                 return "No relevant documents found."
 
+
+            writer("Reranking retrieved documents...")          
             reranked_documents = self.compressor.compress_documents(
                 query=query,
                 documents=docs,
@@ -314,6 +337,7 @@ class Chatbot:
             reranked_documents = [doc for doc in reranked_documents if doc.metadata['relevance_score'] > 0.8]
             citations = format_grouped_sources(reranked_documents)
             logging.info("Citations for reranked documents:")
+            writer(f"Collecting citations...")
             context_text = "\n\n".join([doc.page_content for doc in reranked_documents])
 
             return {

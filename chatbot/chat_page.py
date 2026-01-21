@@ -7,6 +7,7 @@ import fitz  # PyMuPDF
 from PIL import Image
 import logging
 from rich.logging import RichHandler
+from langchain_core.messages import AIMessageChunk
 
 
 system= """You are a helpful assistant with the main purpose of answering queries related to the documents you are given. You have access to a document database and web search to use if the documents don't contain the information needed.
@@ -136,7 +137,7 @@ def find_and_display_page(pdf_file, search_text, target_page_num=None):
                 break
             
     if found_page_index != -1:
-        st.success(f"Found text on page {found_page_index + 1}")
+        # st.success(f"Found text on page {found_page_index + 1}")
         
         # 4. Render the specific page to an image
         page = doc.load_page(found_page_index)
@@ -153,14 +154,14 @@ def display_citations(citations):
     with st.expander("Show citations"):
         for citation in citations:
             st.info(f"Referenced from {citation['source']} (Page {citation['page']})")
-        try: 
-            if citation.get("image"):
-                st.image(citation["image"], use_container_width=True)
-            else:
-                st.warning("Citation image could not be generated")
-        except Exception as e:
-            st.error(f"Error displaying citations: {str(e)}")
-            logging.error(f"Citation display error: {e}")
+            try: 
+                if citation.get("image"):
+                    st.image(citation["image"], use_container_width=True)
+                else:
+                    st.warning("Citation image could not be generated")
+            except Exception as e:
+                st.error(f"Error displaying citations: {str(e)}")
+                logging.error(f"Citation display error: {e}")
     
 # Page configuration
 st.set_page_config(page_title="Chatbot Interface", layout="wide")
@@ -241,32 +242,86 @@ with st.sidebar:
         st.info("Database is empty.")
 
 # Main Content Area
-# st.title(st.session_state.current_page)
 
 if not st.session_state.messages:
 
     default_html = '<p style="color: grey; text-align: center; margin-top: 200px;">Start a conversation...</p>'
     st.markdown(default_html, unsafe_allow_html=True)
 for message in st.session_state.messages:
-    logging.info(f"Rendering message: {st.session_state.messages}")
+    logging.info(f"Rendering message: {message}")
     with st.chat_message(message["role"]):
         if message["role"] == "user":
             st.markdown(message["content"])
         elif message["role"] == "assistant":
-            st.markdown(message["content"]["response"])
+            st.markdown(message["content"]["response"].replace("$", "\$"))
             citations = message["content"].get("citations", [])
-
-            display_citations(citations)
+            if len(citations)>0:
+                display_citations(citations)
             
 
 if prompt := st.chat_input("Type your message here...", key="input_text"):
+        
+        
+
         # Add user message
         st.session_state.messages.append({"role": "user", "content": prompt}) 
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-        bot_response = chatbot.query_chatbot(prompt)
-        if len(bot_response.get("citations", [])) > 0:
-            # Show citations
-            for i, cite in enumerate(bot_response["citations"]):
+        # Handle streaming
+
+        response_generator = chatbot.query_chatbot(prompt)
+
+        with st.chat_message("assistant"):
+            # Create a placeholder for the streaming text
+            message_placeholder = st.empty()
+            full_response_text = ""
+
+            try:
+        
+                for chunk in response_generator:
+                    # If your generator yields objects, extract the text string here
+                    # Example: if isinstance(chunk, dict): chunk = chunk['text']
+
+
+                    if isinstance(chunk["response"], tuple) and isinstance(chunk["response"][0], AIMessageChunk):
+
+                        if isinstance(chunk["response"][0].content, list) and len(chunk["response"][0].content) > 0 :
+                            full_response_text += str(chunk["response"][0].content[0]['text'])
+
+                        elif isinstance(chunk["response"][0].content, str):
+                            stripped_content = chunk["response"][0].content.strip()
+
+                            if stripped_content.startswith('{'):
+                                continue
+
+                            full_response_text += chunk["response"][0].content
+
+                    citations = chunk['citations'] 
+                    
+                    # Update the UI with the accumulated text + a blinking cursor
+                    cleaned_text= full_response_text.replace("$", "\$")
+                    message_placeholder.markdown(cleaned_text+ "▌")
+                
+                # Final update without the cursor
+                message_placeholder.markdown(cleaned_text)
+                
+            except Exception as e:
+                st.error(f"Error during streaming: {e}")
+                logging.error(f"Streaming error: {e}")
+
+
+
+        bot_response = {
+                        "response": full_response_text,
+                        "citations": citations
+                    }
+
+
+        # bot_response = chatbot.query_chatbot(prompt)
+        if len(citations) > 0:
+            # collect citations
+            for i, cite in enumerate(citations):
                 source = cite.get("source")
                 page = cite.get("page")
                 cited_content = cite.get("content")
@@ -275,6 +330,9 @@ if prompt := st.chat_input("Type your message here...", key="input_text"):
                     cited_content,
                     target_page_num=page)
                 if citation_image:
+
+                    
+
                     bot_response["citations"][i]["image"] = citation_image
         st.session_state.messages.append({"role": "assistant", "content": bot_response})
 

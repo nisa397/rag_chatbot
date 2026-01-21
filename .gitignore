@@ -9,3 +9,9 @@ chatbot/testing.py
 chatbot/test.ipynb
 *.sqlite3
 *.sqlite3
+chatbot/test.ipynb
+chatbot/testing.py
+*.bin
+*.pickle
+*.sqlite3
+*.pyc
