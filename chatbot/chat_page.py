@@ -8,6 +8,8 @@ from PIL import Image
 import logging
 from rich.logging import RichHandler
 from langchain_core.messages import AIMessageChunk
+from langchain.messages import HumanMessage, AIMessage, SystemMessage
+
 
 
 system= """You are a helpful assistant with the main purpose of answering queries related to the documents you are given. You have access to a document database and web search to use if the documents don't contain the information needed.
@@ -152,16 +154,24 @@ def find_and_display_page(pdf_file, search_text, target_page_num=None):
 def display_citations(citations):
 
     with st.expander("Show citations"):
-        for citation in citations:
-            st.info(f"Referenced from {citation['source']} (Page {citation['page']})")
-            try: 
-                if citation.get("image"):
-                    st.image(citation["image"], use_container_width=True)
-                else:
-                    st.warning("Citation image could not be generated")
-            except Exception as e:
-                st.error(f"Error displaying citations: {str(e)}")
-                logging.error(f"Citation display error: {e}")
+
+        if len(citations) > 0 and isinstance(citations[0], dict):
+            for citation in citations:
+                st.info(f"Referenced from {citation['source']} (Page {citation['page']})")
+                try: 
+                    if citation.get("image"):
+                        st.image(citation["image"], use_container_width=True)
+                    else:
+                        st.warning("Citation image could not be generated")
+                except Exception as e:
+                    st.error(f"Error displaying citations: {str(e)}")
+                    logging.error(f"Citation display error: {e}")
+
+        elif len(citations)>0 and isinstance(citations[0], str):
+            for citation in citations:
+                st.info(f"Referenced from {citation}")
+
+        
     
 # Page configuration
 st.set_page_config(page_title="Chatbot Interface", layout="wide")
@@ -270,7 +280,9 @@ if prompt := st.chat_input("Type your message here...", key="input_text"):
 
         # Handle streaming
 
+        status_container = st.status("Processing...")
         response_generator = chatbot.query_chatbot(prompt)
+
 
         with st.chat_message("assistant"):
             # Create a placeholder for the streaming text
@@ -283,19 +295,31 @@ if prompt := st.chat_input("Type your message here...", key="input_text"):
                     # If your generator yields objects, extract the text string here
                     # Example: if isinstance(chunk, dict): chunk = chunk['text']
 
+                    tool_called = chunk['stream_mode'] == 'updates' and 'llm' in chunk['response'] and isinstance(chunk['response']['llm']['messages'][0], AIMessage) and len(chunk['response']['llm']['messages'][0].tool_calls)>0
+                    if tool_called:
+                        #Retrieve tool name and get description 
+                        tool_name = chunk['response']['llm']['messages'][0].tool_calls[0]['name']
+                        # logging.info(f"CHATBOT {chatbot}")
+                        tool_desc = chatbot.tool_dict[f"{tool_name}"]
+                        # status_container.write(tool_desc)
+                        status_container.update(label=f"{tool_desc}", state="running")
+                    elif chunk['stream_mode'] == 'custom':
+                        status_container.update(label = f"{chunk['response']}")
 
-                    if isinstance(chunk["response"], tuple) and isinstance(chunk["response"][0], AIMessageChunk):
+                    elif chunk['stream_mode'] == 'messages':
+                        message_chunk, metadata = chunk['response']
 
-                        if isinstance(chunk["response"][0].content, list) and len(chunk["response"][0].content) > 0 :
-                            full_response_text += str(chunk["response"][0].content[0]['text'])
+                        if isinstance(message_chunk, AIMessageChunk) and metadata['langgraph_node'] == 'llm':
 
-                        elif isinstance(chunk["response"][0].content, str):
-                            stripped_content = chunk["response"][0].content.strip()
+                            if isinstance(message_chunk.content, list) and len(chunk["response"][0].content) > 0 :
+                                full_response_text += str(message_chunk.content[0]['text'])
 
-                            if stripped_content.startswith('{'):
-                                continue
+                            elif isinstance(message_chunk.content, str):
+                                stripped_content = message_chunk.content.strip()
 
-                            full_response_text += chunk["response"][0].content
+                                if stripped_content.startswith('{'):
+                                    continue
+                                full_response_text += message_chunk.content
 
                     citations = chunk['citations'] 
                     
@@ -304,6 +328,9 @@ if prompt := st.chat_input("Type your message here...", key="input_text"):
                     message_placeholder.markdown(cleaned_text+ "▌")
                 
                 # Final update without the cursor
+                status_container.update(label="Complete", state="complete", expanded=False)
+
+                logging.info(f"Response: {cleaned_text}")
                 message_placeholder.markdown(cleaned_text)
                 
             except Exception as e:
@@ -319,7 +346,7 @@ if prompt := st.chat_input("Type your message here...", key="input_text"):
 
 
         # bot_response = chatbot.query_chatbot(prompt)
-        if len(citations) > 0:
+        if len(citations) > 0 and isinstance(citations[0], dict):
             # collect citations
             for i, cite in enumerate(citations):
                 source = cite.get("source")
@@ -330,10 +357,8 @@ if prompt := st.chat_input("Type your message here...", key="input_text"):
                     cited_content,
                     target_page_num=page)
                 if citation_image:
-
-                    
-
                     bot_response["citations"][i]["image"] = citation_image
+            
         st.session_state.messages.append({"role": "assistant", "content": bot_response})
 
         st.rerun()

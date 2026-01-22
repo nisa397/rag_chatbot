@@ -50,9 +50,9 @@ class Chatbot:
                 datefmt="[%X]",
                 handlers=[RichHandler(rich_tracebacks=True)]
             )
-                    
         
-
+        self.tool_dict = {'tavily_search': "Searching the web...",
+                      'retrieve_documents': "Retrieving documents from vector store..."}
 
 
         load_dotenv()
@@ -72,7 +72,7 @@ class Chatbot:
         self.vector_store = None
         self.initialize_vector_store()
         self.retriever = self.vector_store.as_retriever(search_type = 'mmr') if self.vector_store else None
-        self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+        self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3)
         search_tool = TavilySearch(max_results=5)
         self.checkpointer = InMemorySaver()
         self.reranker_model = "ctxl-rerank-v2-instruct-multilingual"
@@ -197,10 +197,8 @@ class Chatbot:
         for stream_mode, chunk in self.graph.stream({"messages": messages},
                                         thread, 
                                         stream_mode = ["updates", "custom", "messages"]):
-            logging.info(f"Chunk: {chunk}")
 
             if 'action' in chunk and 'citations' in chunk['action']:
-                # logging.info(f"CITATIONS FOUND: {chunk['action']['citations']}")
                 final_citations = chunk['action']['citations']
             
             
@@ -246,6 +244,11 @@ class Chatbot:
                 tool_output = tools_by_name[t['name']].invoke(t['args'])
                 logging.info("Tool returned result.")
                 logging.info(tool_output)
+
+                if t['name'] == 'tavily_search':
+                    # Get urls and store them in citation
+                    new_citations = [result['url'] for result in tool_output['results']]
+
                 # CHECK: Is this our document tool returning rich data?
                 if isinstance(tool_output, dict) and "citations" in tool_output:
                     # 1. Give the LLM ONLY the text content
@@ -272,9 +275,6 @@ class Chatbot:
             """Search and return information relevant to the query, within the stored database. """
 
             writer = get_stream_writer()
-
-            writer(f"Retrieving documents from vector store...")
-
             structured_llm = self.llm.with_structured_output(SearchParams)
 
             available_docs = self.get_existing_documents()
@@ -291,7 +291,6 @@ class Chatbot:
 
             # 3. Run the extraction
             params = structured_llm.invoke(prompt)
-            # Result: params.query='holidays', params.document_title='HR Manual'
 
             
 
