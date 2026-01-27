@@ -84,6 +84,10 @@ class Chatbot:
         self.thread = '1' 
         logging.info("Chatbot initialized with tools and graph.")
 
+        rephrase_prompt = """Rewrite the user's question to be standalone, given the history. If the question is already standalone, return it exactly as is. Question: {question}, History: {history}"""
+        template = ChatPromptTemplate.from_template(rephrase_prompt)
+        self.rephrase_query_chain = template | self.llm
+
     def huggingface_token_len(self, text):
         return len(self.tokenizer.encode(text))
 
@@ -128,11 +132,13 @@ class Chatbot:
     def create_graph(self, tools):
         logging.info("Creating state graph for the agent.")
         graph = StateGraph(AgentState)
+        graph.add_node("rephrase_query", self.call_rephrase_query)
         graph.add_node("llm", self.call_llm)
         graph.add_node("action", self.call_action )
+        graph.set_entry_point("rephrase_query")
+        graph.add_edge("rephrase_query", "llm")
         graph.add_conditional_edges("llm", self.exists_action, {True: "action", False: END})
         graph.add_edge("action", "llm")
-        graph.set_entry_point("llm")
         graph = graph.compile(checkpointer = self.checkpointer)
         logging.info(f"tools list: {tools}")
         self.model = self.llm.bind_tools(tools)
@@ -190,6 +196,8 @@ class Chatbot:
     def query_chatbot(self, query: str):
         messages = [HumanMessage(content=query)]
 
+        
+
         thread={"configurable": {"thread_id": '1'}}
 
         final_citations= []
@@ -220,11 +228,63 @@ class Chatbot:
 
     # NODES
 
+    def call_rephrase_query(self, state: AgentState):
+        messages = state['messages']
+        logging.info("Preparing to call LLM with message history.")
+        logging.info(f"Message history: {messages}")
+        if len(messages) > 1:
+
+            last_message = messages[-1]
+
+            if isinstance(last_message, HumanMessage):
+                rephrased_query = self.rephrase_query_chain.invoke({
+                    "question": last_message.content,
+                    "history": messages[:-1]
+                }, config={"callbacks": []})
+
+                logging.info(f"Rephrased query: {rephrased_query}")
+
+                if (is_follow_up(last_message.content, rephrased_query.content)):
+                    logging.info("Detected follow-up question.")
+                    messages = messages[:-1] + [HumanMessage(content=rephrased_query.content)]
+
+                    return {'messages': messages}
+                else:
+                    logging.info("Detected standalone question.")
+            
+        return {}
+
     def call_llm(self, state: AgentState):
         messages = state['messages']
+        # logging.info("Preparing to call LLM with message history.")
+        # logging.info(f"Message history: {messages}")
+        # # if len(messages) > 1:
+
+        # #     last_message = messages[-1]
+
+        # #     if isinstance(last_message, HumanMessage):
+        # #         rephrased_query = self.rephrase_query_chain.invoke({
+        # #             "question": last_message.content,
+        # #             "history": messages[:-1]
+        # #         }, config={"callbacks": []})
+
+        # #         logging.info(f"Rephrased query: {rephrased_query}")
+
+        # #         if (is_follow_up(last_message.content, rephrased_query.content)):
+        # #             logging.info("Detected follow-up question.")
+        # #             messages = messages[:-1] + [HumanMessage(content=rephrased_query.content)]
+        # #         else:
+        # #             logging.info("Detected standalone question.")
+            
+
         if self.system:
             messages = [SystemMessage(content=self.system)] + messages
+
+        
         message = self.model.invoke(messages)
+
+
+
         return {'messages': [message]}
 
     def call_action(self, state: AgentState):
@@ -386,5 +446,13 @@ def clean_text(text):
     text = ' '.join(text.split())
     return text
 
+def is_follow_up(original_query, rewritten_query):
+    # Simple normalization function
+    def normalize(text):
+        return text.lower().strip("?.!, ")
 
+    if normalize(original_query) != normalize(rewritten_query):
+        return True  # It changed! It was a follow-up.
+    else:
+        return False # No change. It was standalone.
 
