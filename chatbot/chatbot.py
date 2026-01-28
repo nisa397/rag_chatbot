@@ -232,6 +232,7 @@ class Chatbot:
         messages = state['messages']
         logging.info("Preparing to call LLM with message history.")
         logging.info(f"Message history: {messages}")
+        writer = get_stream_writer()
         if len(messages) > 1:
 
             last_message = messages[-1]
@@ -243,7 +244,7 @@ class Chatbot:
                 }, config={"callbacks": []})
 
                 logging.info(f"Rephrased query: {rephrased_query}")
-
+                writer(f"Processing query: {rephrased_query}...")
                 if (is_follow_up(last_message.content, rephrased_query.content)):
                     logging.info("Detected follow-up question.")
                     messages = messages[:-1] + [HumanMessage(content=rephrased_query.content)]
@@ -256,26 +257,7 @@ class Chatbot:
 
     def call_llm(self, state: AgentState):
         messages = state['messages']
-        # logging.info("Preparing to call LLM with message history.")
-        # logging.info(f"Message history: {messages}")
-        # # if len(messages) > 1:
-
-        # #     last_message = messages[-1]
-
-        # #     if isinstance(last_message, HumanMessage):
-        # #         rephrased_query = self.rephrase_query_chain.invoke({
-        # #             "question": last_message.content,
-        # #             "history": messages[:-1]
-        # #         }, config={"callbacks": []})
-
-        # #         logging.info(f"Rephrased query: {rephrased_query}")
-
-        # #         if (is_follow_up(last_message.content, rephrased_query.content)):
-        # #             logging.info("Detected follow-up question.")
-        # #             messages = messages[:-1] + [HumanMessage(content=rephrased_query.content)]
-        # #         else:
-        # #             logging.info("Detected standalone question.")
-            
+        
 
         if self.system:
             messages = [SystemMessage(content=self.system)] + messages
