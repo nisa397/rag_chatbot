@@ -133,7 +133,6 @@ class Chatbot:
         logging.info("Creating state graph for the agent.")
         graph = StateGraph(AgentState)
         graph.add_node("rephrase_query", self.call_rephrase_query)
-        graph.add_node("rephrase_query", self.call_rephrase_query)
         graph.add_node("llm", self.call_llm)
         graph.add_node("action", self.call_action )
         graph.set_entry_point("rephrase_query")
