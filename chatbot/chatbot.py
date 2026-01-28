@@ -83,7 +83,7 @@ class Chatbot:
         self.graph = self.create_graph(self.tools)
         self.thread = '1' 
         logging.info("Chatbot initialized with tools and graph.")
-
+        
         rephrase_prompt = """Rewrite the user's question to be standalone, given the history. If the question is already standalone, return it exactly as is. Question: {question}, History: {history}"""
         template = ChatPromptTemplate.from_template(rephrase_prompt)
         self.rephrase_query_chain = template | self.llm
@@ -132,6 +132,7 @@ class Chatbot:
     def create_graph(self, tools):
         logging.info("Creating state graph for the agent.")
         graph = StateGraph(AgentState)
+        graph.add_node("rephrase_query", self.call_rephrase_query)
         graph.add_node("rephrase_query", self.call_rephrase_query)
         graph.add_node("llm", self.call_llm)
         graph.add_node("action", self.call_action )
@@ -196,8 +197,6 @@ class Chatbot:
     def query_chatbot(self, query: str):
         messages = [HumanMessage(content=query)]
 
-        
-
         thread={"configurable": {"thread_id": '1'}}
 
         final_citations= []
@@ -217,9 +216,7 @@ class Chatbot:
             }
          
         # final_text = parse_output(response['messages'][-1].content)
-         
-        
-        
+               
 
     def exists_action(self, state: AgentState):
         result = state['messages'][-1]
@@ -230,8 +227,9 @@ class Chatbot:
 
     def call_rephrase_query(self, state: AgentState):
         messages = state['messages']
+        writer = get_stream_writer()
         logging.info("Preparing to call LLM with message history.")
-        logging.info(f"Message history: {messages}")
+        # logging.info(f"Message history: {messages}")
         if len(messages) > 1:
 
             last_message = messages[-1]
@@ -243,7 +241,7 @@ class Chatbot:
                 }, config={"callbacks": []})
 
                 logging.info(f"Rephrased query: {rephrased_query}")
-
+                writer(f"Processing query: {rephrased_query.content}")
                 if (is_follow_up(last_message.content, rephrased_query.content)):
                     logging.info("Detected follow-up question.")
                     messages = messages[:-1] + [HumanMessage(content=rephrased_query.content)]
@@ -256,35 +254,9 @@ class Chatbot:
 
     def call_llm(self, state: AgentState):
         messages = state['messages']
-        # logging.info("Preparing to call LLM with message history.")
-        # logging.info(f"Message history: {messages}")
-        # # if len(messages) > 1:
-
-        # #     last_message = messages[-1]
-
-        # #     if isinstance(last_message, HumanMessage):
-        # #         rephrased_query = self.rephrase_query_chain.invoke({
-        # #             "question": last_message.content,
-        # #             "history": messages[:-1]
-        # #         }, config={"callbacks": []})
-
-        # #         logging.info(f"Rephrased query: {rephrased_query}")
-
-        # #         if (is_follow_up(last_message.content, rephrased_query.content)):
-        # #             logging.info("Detected follow-up question.")
-        # #             messages = messages[:-1] + [HumanMessage(content=rephrased_query.content)]
-        # #         else:
-        # #             logging.info("Detected standalone question.")
-            
-
         if self.system:
             messages = [SystemMessage(content=self.system)] + messages
-
-        
         message = self.model.invoke(messages)
-
-
-
         return {'messages': [message]}
 
     def call_action(self, state: AgentState):
